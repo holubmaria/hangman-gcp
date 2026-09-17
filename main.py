@@ -1,57 +1,78 @@
 import os
 import random
 from flask import Flask, jsonify, request
+from flask_cors import CORS
+from google.cloud import firestore
 
 app = Flask(__name__)
+CORS(app)
 
 WORD_BANK = ["google", "cloud", "serverless", "container", "kubernetes", "developer"]
 
-# Simple in-memory game session tracker (For a production multi-user setup, use Firestore)
-games = {}
+# Initialize Firestore Client
+db = firestore.Client()
 
 @app.route('/api/start', methods=['POST'])
 def start_game():
-    game_id = str(random.randint(1000, 9999))
     secret_word = random.choice(WORD_BANK)
     
-    games[game_id] = {
+    # Create a new document in the 'games' collection with an auto-generated ID
+    game_ref = db.collection("games").document()
+    game_id = game_ref.id
+    
+    game_ref.set({
         "word": secret_word,
         "guessed": [],
         "lives": 6
-    }
+    })
     
     display = ["_" for _ in secret_word]
     return jsonify({"game_id": game_id, "display": display, "lives": 6})
 
 @app.route('/api/guess', methods=['POST'])
 def make_guess():
-    data = request.json
+    data = request.json or {}
     game_id = data.get("game_id")
     letter = data.get("letter", "").lower()
     
-    if game_id not in games:
+    if not game_id:
+        return jsonify({"error": "game_id is required"}), 400
+        
+    game_ref = db.collection("games").document(str(game_id))
+    game_doc = game_ref.get()
+    
+    if not game_doc.exists:
         return jsonify({"error": "Game not found"}), 404
         
-    game = games[game_id]
-    if letter and letter not in game["guessed"]:
-        game["guessed"].append(letter)
-        if letter not in game["word"]:
-            game["lives"] -= 1
+    game = game_doc.to_dict()
+    word = game.get("word", "")
+    guessed = game.get("guessed", [])
+    lives = game.get("lives", 6)
+    
+    if letter and letter not in guessed:
+        guessed.append(letter)
+        if letter not in word:
+            lives -= 1
+        # Update the state in Firestore
+        game_ref.update({
+            "guessed": guessed,
+            "lives": lives
+        })
 
     # Calculate current state
-    display = [char if char in game["guessed"] else "_" for char in game["word"]]
+    display = [char if char in guessed else "_" for char in word]
     
     status = "playing"
     if "_" not in display:
         status = "win"
-    elif game["lives"] <= 0:
+    elif lives <= 0:
         status = "lose"
         
     return jsonify({
         "display": display,
-        "lives": game["lives"],
+        "lives": lives,
         "status": status,
-        "secret_word": game["word"] if status == "lose" else ""
+        "secret_word": word if status == "lose" else ""
     })
 
 if __name__ == "__main__":
